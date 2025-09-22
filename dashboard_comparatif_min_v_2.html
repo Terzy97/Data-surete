@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Comparatif délinquance – Officiel vs Interne (Version légère + filtres)</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root{color-scheme:light}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#f7f8fa;color:#0f172a}
+    .layout{max-width:1200px;margin:0 auto;padding:20px;display:flex;flex-direction:column;gap:14px}
+    header h1{margin:0;font-size:1.4rem}
+    .controls{display:grid;grid-template-columns:1fr;gap:10px;background:#fff;padding:12px;border:1px solid #e5e7eb;border-radius:12px}
+    .row{display:flex;gap:8px;align-items:end;flex-wrap:wrap}
+    .controls label{font-size:.85rem;color:#475569}
+    select{width:220px;max-width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
+    .btn{appearance:none;border:1px solid #cbd5e1;background:#fff;border-radius:10px;padding:8px 10px;cursor:pointer}
+    .btn.primary{background:#0ea5e9;border-color:#0284c7;color:#fff}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+    .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;position:relative}
+    .card h2{margin:0;padding:10px 12px;font-size:1rem;border-bottom:1px solid #e5e7eb;background:#f9fafb}
+    .status{padding:0 12px 10px;font-size:.85rem;color:#475569}
+    .map{height:520px}
+    .legend{position:absolute;top:10px;right:10px;background:#fff;padding:10px 12px;border:1px solid #e5e7eb;border-radius:10px;font-size:.85rem;box-shadow:0 8px 24px rgba(0,0,0,.08)}
+    .legend .scale{display:grid;grid-template-columns:18px 1fr;gap:6px;margin-top:6px}
+    .chip{width:16px;height:12px;display:inline-block;border-radius:2px;border:1px solid rgba(0,0,0,.1);margin-top:2px}
+    .pill{padding:2px 6px;background:#f1f5f9;border-radius:999px;font-size:.85rem}
+  </style>
+</head>
+<body>
+  <main class="layout">
+    <header>
+      <h1>Comparatif par département – Données officielles vs données internes</h1>
+      <p style="margin:.25rem 0 0;color:#475569;font-size:.95rem">Version allégée : type, catégorie, indicateur, année, métrique. Bouton de rechargement.</p>
+    </header>
+
+    <section class="controls">
+      <div class="row">
+        <div>
+          <label for="type">Type</label>
+          <select id="type"><option value="__all__" selected>Tous</option></select>
+        </div>
+        <div>
+          <label for="category">Catégorie</label>
+          <select id="category"><option value="__all__" selected>Toutes</option></select>
+        </div>
+        <div>
+          <label for="indicator">Indicateur</label>
+          <select id="indicator"><option>Chargement…</option></select>
+        </div>
+        <div>
+          <label for="year">Année</label>
+          <select id="year"><option>Chargement…</option></select>
+        </div>
+        <div>
+          <label for="metric">Métrique</label>
+          <select id="metric">
+            <option value="nombre" selected>Nombre total</option>
+            <option value="taux">Taux pour 1 000</option>
+          </select>
+        </div>
+        <div>
+          <button id="reload" class="btn primary" type="button">⟲ Recharger les données</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <h2>Officiel (SSMSI)</h2>
+        <div class="status" id="status-gouv">Connexion à data.gouv.fr…</div>
+        <div id="map-gouv" class="map"></div>
+        <div class="legend" id="legend-gouv"><strong>Légende (Gouv)</strong> <span id="legend-gouv-metric" class="pill"></span>
+          <div id="legend-gouv-scale" class="scale"></div>
+        </div>
+      </article>
+      <article class="card">
+        <h2>Interne</h2>
+        <div class="status" id="status-interne">Chargement des données internes…</div>
+        <div id="map-interne" class="map"></div>
+        <div class="legend" id="legend-interne"><strong>Légende (Interne)</strong> <span id="legend-interne-metric" class="pill"></span>
+          <div id="legend-interne-scale" class="scale"></div>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+  (async () => {
+    // === CONFIG ===
+    const INTERNAL_DATA_URL = "https://raw.githubusercontent.com/Terzy97/Data-surete/refs/heads/main/donnees_internes_normalisees.csv"; // tes données
+    const GOUV_RESOURCE_ID = '93438d99-b493-499c-b39f-7de46fa58669'; // SSMSI
+    const GEOJSON_URL = 'https://raw.githubusercontent.com/gregoiredavid/france-geojson/master/departements.geojson';
+
+    // === OUTILS ===
+    const normKey = s => (s==null?'' : String(s))
+      .normalize('NFD').replace(/[\p{Diacritic}]/gu,'').replace(/[^\p{Letter}\p{Number}]+/gu,' ').trim().toLowerCase();
+    const depCode = v => { if (v==null) return ''; const raw=String(v).trim().toUpperCase(); if(raw==='2A'||raw==='2B') return raw; const d=raw.replace(/[^0-9]/g,''); if(!d) return raw; return d.padStart(d.startsWith('97')?3:2,'0'); };
+    const toNum = v => { if (v==null||v==='') return null; if (typeof v==='number') return isFinite(v)?v:null; const n=Number(String(v).replace(/\s+/g,'').replace(',','.')); return isFinite(n)?n:null; };
+    const yearOf = v => { if (v==null) return null; if (typeof v==='number'&&v>1900&&v<2100) return Math.floor(v); const m=String(v).match(/(20\d{2}|19\d{2})/); return m?Number(m[1]):null; };
+
+    // Catégorisation minimale (type & catégorie)
+    const META_MAP = new Map([
+      // Gouv libellés usuels
+      ['homicides', ['personnes','agression_physique','Homicides']],
+      ["tentatives d homicide", ['personnes','agression_physique','Tentatives d\'homicide']],
+      ['violences physiques intrafamiliales', ['personnes','agression_physique','Violences physiques intrafamiliales']],
+      ['violences physiques hors cadre familial', ['personnes','agression_physique','Violences physiques hors cadre familial']],
+      ['violences sexuelles', ['personnes','violences_sexuelles','Violences sexuelles']],
+      ['vols avec armes', ['biens','braquage','Vols avec armes']],
+      ['vols violents sans arme', ['personnes','agression_physique','Vols violents sans arme']],
+      ['vols sans violence contre des personnes', ['biens','vol','Vols sans violence contre des personnes']],
+      ['vols dans les vehicules', ['biens','vol','Vols dans les véhicules']],
+      ['vols d accessoires sur vehicules', ['biens','vol','Vols d\'accessoires sur véhicules']],
+      ['vols de vehicule', ['biens','vol','Vols de véhicule']],
+      ['cambriolages de logement', ['biens','cambriolage','Cambriolages de logement']],
+      ['destructions et degradations volontaires', ['biens','vandalisme','Destructions et dégradations volontaires']],
+      ['escroqueries et fraudes aux moyens de paiement', ['biens','fraudes','Escroqueries et fraudes']],
+      ['usage de stupefiants', ['biens','stup','Usage de stupéfiants']],
+      ['trafic de stupefiants', ['biens','stup','Trafic de stupéfiants']],
+      // Interne mots-clés
+      ['agression physique', ['personnes','agression_physique','Agressions physiques']],
+      ['agression verbale', ['personnes','agression_verbale','Agressions verbales']],
+      ['violences sexuelles', ['personnes','violences_sexuelles','Violences sexuelles']],
+      ['braquage', ['biens','braquage','Braquages']],
+      ['cambriolage', ['biens','cambriolage','Cambriolages']],
+      ['vol', ['biens','vol','Vols']],
+      ['fraude', ['biens','fraudes','Fraudes']],
+      ['vandalisme', ['biens','vandalisme','Vandalisme']],
+      ['stup', ['biens','stup','Stupéfiants']],
+    ]);
+    const TYPE_LABELS = { personnes:'Atteintes aux personnes', biens:'Atteintes aux biens' };
+    const ensureMeta = (label, fallback='Autres') => { const k=normKey(label); for (const [key,val] of META_MAP.entries()){ if (k.includes(key)) return val; } return ['biens','biens_autres',fallback]; };
+
+    // === CHARGEMENTS ===
+    async function loadGeo(){ const r = await fetch(GEOJSON_URL); if(!r.ok) throw new Error('GeoJSON KO'); return r.json(); }
+
+    async function loadGouv(){
+      const url = `https://www.data.gouv.fr/api/1/datasets/r/${GOUV_RESOURCE_ID}`;
+      const r = await fetch(url,{cache:'no-store'}); if(!r.ok) throw new Error('SSMSI KO');
+      const txt = await r.text();
+      const rows=[]; const lines = txt.split(/\r?\n/).filter(Boolean); if(!lines.length) return rows;
+      const sep = lines[0].includes(';')? ';' : ','; const cols = lines[0].split(sep);
+      const idx = o => cols.findIndex(c => normKey(c).includes(o));
+      const iDep = idx('code departement'); const iInd = idx('indicateur'); const iAnn = idx('annee');
+      const iNb = idx('nombre'); const iTx = idx('taux'); const iPop = idx('pop');
+      for (let i=1;i<lines.length;i++){
+        const c = lines[i].split(sep);
+        const code = depCode(c[iDep]); const annee = yearOf(c[iAnn]); if(!code||!annee) continue;
+        const indic = c[iInd]||''; const [typeKey, categoryKey, catLabel] = ensureMeta(indic, 'Autres');
+        rows.push({ source:'gouv', code, annee,
+          nombre: toNum(c[iNb]), taux: toNum(c[iTx]), population: toNum(c[iPop]),
+          indicatorKey: 'gouv:'+normKey(indic||'indicateur'), indicatorLabel: indic||'Indicateur',
+          typeKey, categoryKey, categoryLabel: catLabel
+        });
+      }
+      return rows;
+    }
+
+    async function loadInternal(){
+      const r = await fetch(INTERNAL_DATA_URL, {cache:'no-store'}); if(!r.ok) throw new Error('Interne URL KO');
+      const txt = await r.text(); const rows=[]; const lines = txt.split(/\r?\n/).filter(Boolean); if(!lines.length) return rows;
+      const cols = lines[0].split(',');
+      const col = n => cols.findIndex(c=> normKey(c)===normKey(n));
+      const iDep = col('departement'); const iInd = col('indicateur'); const iAnn = col('annee');
+      const iNb = col('nombre'); const iTx = col('taux'); const iPop = col('population');
+      for (let i=1;i<lines.length;i++){
+        const c = lines[i].split(','); const code = depCode(c[iDep]); const annee = yearOf(c[iAnn]); if(!code||!annee) continue;
+        const indic = c[iInd]||''; const [typeKey, categoryKey, catLabel] = ensureMeta(indic||'', 'Catégorie');
+        rows.push({ source:'interne', code, annee,
+          nombre: toNum(c[iNb]), taux: toNum(c[iTx]), population: toNum(c[iPop]),
+          indicatorKey: 'interne:'+normKey(indic||'categorie'), indicatorLabel: indic||'Catégorie',
+          typeKey, categoryKey, categoryLabel: catLabel
+        });
+      }
+      return rows;
+    }
+
+    // === CARTES ===
+    const mapG = L.map('map-gouv', {minZoom:4.5,maxZoom:11}).setView([46.6,2.6],6);
+    const mapI = L.map('map-interne', {minZoom:4.5,maxZoom:11}).setView([46.6,2.6],6);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap'}).addTo(mapG);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap'}).addTo(mapI);
+
+    const statusG = document.getElementById('status-gouv');
+    const statusI = document.getElementById('status-interne');
+    const $type = document.getElementById('type');
+    const $category = document.getElementById('category');
+    const $indicator = document.getElementById('indicator');
+    const $year = document.getElementById('year');
+    const $metric = document.getElementById('metric');
+    const $reload = document.getElementById('reload');
+
+    const fmtN = new Intl.NumberFormat('fr-FR', {maximumFractionDigits:0});
+    const fmtR = new Intl.NumberFormat('fr-FR', {minimumFractionDigits:2, maximumFractionDigits:2});
+
+    const state = { gouv:[], interne:[], geo:null };
+
+    function thresholds(values){
+      if(!values.length) return {min:0,max:0,b:[0,0,0,0]};
+      const s = values.slice().sort((a,b)=>a-b);
+      const min=s[0], max=s[s.length-1];
+      if(min===max) return {min,max,b:[min,min,min,min]};
+      const step=(max-min)/5; return {min,max,b:[1,2,3,4].map(i=>min+i*step)};
+    }
+    function colorFor(v,b){
+      if(!isFinite(v)) return '#f5f5f5';
+      if(v<=b[0]) return '#feedde';
+      if(v<=b[1]) return '#fdbe85';
+      if(v<=b[2]) return '#fd8d3c';
+      if(v<=b[3]) return '#e6550d';
+      return '#a63603';
+    }
+
+    function buildOptions(){
+      const all = [...state.gouv, ...state.interne];
+      // Types & catégories
+      const types = new Map();
+      const categories = new Map();
+      for(const r of all){
+        const tKey = r.typeKey; const cKey = r.categoryKey;
+        if (tKey) types.set(tKey, TYPE_LABELS[tKey]||tKey);
+        if (tKey && cKey){ const enc = `${tKey}::${cKey}`; if(!categories.has(enc)) categories.set(enc, r.categoryLabel||cKey); }
+      }
+      $type.innerHTML = '<option value="__all__">Tous</option>' + [...types.entries()].map(([k,l])=>`<option value="${k}">${l}</option>`).join('');
+      const rebuildCats = () => {
+        const selType = $type.value;
+        const items = [...categories.entries()].filter(([enc])=> selType==='__all__' || enc.startsWith(selType+'::'))
+          .map(([enc,label])=>({enc,label, sort:`${label}`})).sort((a,b)=>a.sort.localeCompare(b.sort,'fr'));
+        $category.innerHTML = '<option value="__all__">Toutes</option>' + items.map(x=>`<option value="${x.enc}">${x.label}</option>`).join('');
+      };
+      rebuildCats();
+      $type.onchange = () => { rebuildCats(); rebuildIndicators(); update(); };
+      $category.onchange = () => { rebuildIndicators(); update(); };
+
+      function rebuildIndicators(){
+        const selType = $type.value; const selCat = $category.value;
+        const set = new Map();
+        for (const r of all){
+          if (selType!=='__all__' && r.typeKey!==selType) continue;
+          if (selCat!=='__all__' && `${r.typeKey}::${r.categoryKey}`!==selCat) continue;
+          set.set(r.indicatorKey, r.indicatorLabel + (r.source==='gouv'?' (Gouv)':' (Interne)'));
+        }
+        const list = [...set.entries()].sort((a,b)=>a[1].localeCompare(b[1],'fr'));
+        $indicator.innerHTML = '<option value="__all__">Tous</option>' + list.map(([k,l])=>`<option value="${k}">${l}</option>`).join('');
+      }
+      rebuildIndicators();
+
+      const years = [...new Set(all.map(r=>r.annee))].filter(Boolean).sort((a,b)=>b-a);
+      $year.innerHTML = '<option value="__all__">Toutes</option>' + years.map(y=>`<option value="${y}">${y}</option>`).join('');
+    }
+
+    function render(rows, map, metric, isInterne){
+      if(!state.geo) return;
+      const yearSel = $year.value==='__all__'? null : Number($year.value);
+      const indicSel = $indicator.value==='__all__'? null : $indicator.value;
+      const typeSel = $type.value==='__all__'? null : $type.value;
+      const catSel = $category.value==='__all__'? null : $category.value;
+      const sel = rows.filter(r =>
+        (yearSel==null || r.annee===yearSel) &&
+        (indicSel==null || r.indicatorKey===indicSel) &&
+        (typeSel==null || r.typeKey===typeSel) &&
+        (catSel==null || `${r.typeKey}::${r.categoryKey}`===catSel)
+      );
+      const agg = new Map();
+      for(const r of sel){
+        const k = r.code; if(!k) continue;
+        const a = agg.get(k) || {n:0, tSum:0, tCnt:0, pop:null};
+        if (isFinite(r.nombre)) a.n += r.nombre || 0;
+        if (isFinite(r.taux)) { a.tSum += r.taux; a.tCnt += 1; }
+        if (isFinite(r.population) && a.pop==null) a.pop = r.population;
+        agg.set(k,a);
+      }
+      const vals=[]; agg.forEach(v => { const x = metric==='taux' ? (v.tCnt? v.tSum/v.tCnt : NaN) : v.n; if (isFinite(x)) vals.push(x); });
+      const th = thresholds(vals);
+      const legendScale = (isInterne? document.getElementById('legend-interne-scale'): document.getElementById('legend-gouv-scale'));
+      const legendMetric = (isInterne? document.getElementById('legend-interne-metric'): document.getElementById('legend-gouv-metric'));
+      legendMetric.textContent = metric==='taux' ? 'Taux / 1 000' : 'Nombre total';
+      legendScale.innerHTML = '';
+      const stops = vals.length? [th.min, ...th.b, th.max] : [];
+      for(let i=0;i<Math.max(1,stops.length-1);i++){
+        const from = stops[i]??0, to = stops[i+1]??0;
+        const colour = colorFor(to, th.b);
+        const label = th.min===th.max ? `${fmtN.format(from)}` : `${fmtN.format(from)} - ${fmtN.format(to)}`;
+        const row = document.createElement('div'); row.style.display='contents';
+        const chip = document.createElement('span'); chip.className='chip'; chip.style.background=colour;
+        const txt = document.createElement('span'); txt.textContent = label;
+        legendScale.appendChild(chip); legendScale.appendChild(txt);
+      }
+
+      if (map._layerAgg) { map.removeLayer(map._layerAgg); map._layerAgg = null; }
+      const layer = L.geoJSON(state.geo, {
+        style: f => {
+          const code = depCode(f.properties.code||'');
+          const v = agg.get(code);
+          const val = v? (metric==='taux'?(v.tCnt? v.tSum/v.tCnt : NaN): v.n) : NaN;
+          return { fillColor: colorFor(val, th.b), weight:1, color:'#334155', fillOpacity: isFinite(val)?0.8:0.45 };
+        },
+        onEachFeature: (f, lyr) => {
+          const code = depCode(f.properties.code||'');
+          const v = agg.get(code);
+          const name = f.properties.nom || f.properties.name || `Code ${code}`;
+          if(!v){ lyr.bindPopup(`<strong>${name}</strong><br>Données indisponibles.`); return; }
+          const nb = isFinite(v.n)? `${fmtN.format(v.n)} faits` : 'n.d.';
+          const taux = v.tCnt? `${fmtR.format(v.tSum/v.tCnt)} / 1 000` : 'n.d.';
+          const label = metric==='taux'? taux : nb;
+          lyr.bindPopup(`<strong>${name}</strong><br>${label}`);
+          lyr.on('mouseover', e=>{ e.target.setStyle({weight:2,color:'#0f172a',fillOpacity:0.9}); });
+          lyr.on('mouseout', e=>{ layer.resetStyle(e.target); });
+          lyr.on('click', e=> map.fitBounds(e.target.getBounds(),{padding:[18,18]}) );
+        }
+      }).addTo(map);
+      map._layerAgg = layer;
+      const b = layer.getBounds(); if (b.isValid()) map.fitBounds(b,{padding:[20,20]});
+    }
+
+    function update(){
+      const metric = $metric.value; // 'nombre' | 'taux'
+      render(state.gouv, mapG, metric, false);
+      render(state.interne, mapI, metric, true);
+    }
+
+    try {
+      const [geo, gouvRows, intRows] = await Promise.all([
+        loadGeo().then(g=>{statusG.textContent='Fond de carte chargé.'; return g;}),
+        loadGouv().then(r=>{statusG.textContent='Données SSMSI chargées.'; return r;}).catch(e=>{statusG.textContent='Erreur chargement SSMSI.'; console.warn(e); return [];}),
+        loadInternal().then(r=>{statusI.textContent='Données internes chargées.'; return r;}).catch(e=>{statusI.textContent='Erreur chargement données internes.'; console.warn(e); return [];}),
+      ]);
+      state.geo = geo; state.gouv = gouvRows; state.interne = intRows;
+      buildOptions();
+      $indicator.addEventListener('change', update);
+      $year.addEventListener('change', update);
+      $metric.addEventListener('change', update);
+      update();
+
+      // Bouton Recharger
+      $reload.addEventListener('click', async () => {
+        $reload.disabled = true; $reload.textContent = '… Mise à jour';
+        try {
+          const [gouvRows2, intRows2] = await Promise.all([
+            loadGouv().then(r=>{statusG.textContent='Données SSMSI rechargées.'; return r;}).catch(e=>{statusG.textContent='Erreur SSMSI.'; console.warn(e); return state.gouv;}),
+            loadInternal().then(r=>{statusI.textContent='Données internes rechargées.'; return r;}).catch(e=>{statusI.textContent='Erreur internes.'; console.warn(e); return state.interne;}),
+          ]);
+          state.gouv = gouvRows2; state.interne = intRows2; buildOptions(); update();
+        } finally { $reload.disabled=false; $reload.textContent='⟲ Recharger les données'; }
+      });
+
+    } catch (e) {
+      statusG.textContent = 'Erreur initialisation.'; statusI.textContent = 'Erreur initialisation.';
+      console.error(e);
+    }
+  })();
+  </script>
+</body>
+</html>
