@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Délinquance par département – données officielles (SSMSI) – 6 classes orange</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background: #f6f7f9; color: #0f172a; }
+    .layout { max-width: 1120px; margin: 0 auto; padding: 26px 18px 40px; display: flex; flex-direction: column; gap: 16px; }
+    header { text-align: center; display: flex; flex-direction: column; gap: 8px; }
+    h1 { margin: 0; font-size: 1.8rem; font-weight: 700; }
+    .subtitle { margin: 0 auto; max-width: 760px; font-size: 1rem; line-height: 1.55; color: #475569; }
+    .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; background: #ffffff; padding: 14px 16px; border-radius: 16px; box-shadow: 0 18px 34px rgba(15, 23, 42, 0.08); border: 1px solid rgba(148, 163, 184, 0.35); }
+    .control { display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #475569; }
+    .control label { font-weight: 600; letter-spacing: .02em; }
+    select { width: 100%; padding: 9px 12px; border-radius: 10px; border: 1px solid rgba(148,163,184,.6); background: #f9fafb; color: #111827; font-size: .95rem; }
+    #map { width: 100%; height: 720px; border-radius: 18px; box-shadow: 0 20px 46px rgba(15, 23, 42, .16); overflow: hidden; border: 1px solid rgba(15, 23, 42, .12); }
+    .legend, .info { background: rgba(255,255,255,.95); padding: 14px 16px; border-radius: 14px; box-shadow: 0 12px 36px rgba(15, 23, 42, .13); font-size: .86rem; color: #1f2937; min-width: 220px; }
+    .legend h3 { margin: 0 0 8px; font-size: .95rem; font-weight: 600; color: #334155; }
+    .legend span { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+    .legend i { display: block; width: 18px; height: 14px; border-radius: 4px; border: 1px solid rgba(15,23,42,.14); }
+    .legend i.missing { background: repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(203,213,225,.45) 4px, rgba(203,213,225,.45) 7px); }
+    .status { text-align: center; font-size: .92rem; color: #4b5563; }
+    .status strong { color: #1d4ed8; }
+    @media (max-width: 780px){ #map { height: 560px; } }
+  </style>
+</head>
+<body>
+  <main class="layout">
+    <header>
+      <h1>Carte départementale – Délinquance (SSMSI)</h1>
+      <p class="subtitle">Connexion directe aux données officielles **data.gouv.fr (SSMSI)**. Filtrez par type (biens/personnes), catégorie, indicateur, année et métrique. Légende à <strong>6 intervalles</strong> en nuances d’orange selon les faits observés.</p>
+    </header>
+
+    <section class="controls">
+      <div class="control">
+        <label for="type-select">Type d'atteinte</label>
+        <select id="type-select" disabled></select>
+      </div>
+      <div class="control">
+        <label for="category-select">Catégorie</label>
+        <select id="category-select" disabled></select>
+      </div>
+      <div class="control">
+        <label for="indicator-select">Indicateur</label>
+        <select id="indicator-select" disabled></select>
+      </div>
+      <div class="control">
+        <label for="year-select">Année</label>
+        <select id="year-select" disabled></select>
+      </div>
+      <div class="control">
+        <label for="metric-select">Métrique</label>
+        <select id="metric-select" disabled>
+          <option value="nombre" selected>Nombre (faits)</option>
+          <option value="taux">Taux pour 1 000 hab.</option>
+        </select>
+      </div>
+    </section>
+
+    <div id="map"></div>
+    <div id="status" class="status">Initialisation…</div>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script>
+  (async () => {
+    // === CONFIG ===
+    const RESOURCE_ID = '93438d99-b493-499c-b39f-7de46fa58669'; // SSMSI departemental
+    const RESOURCE_URL = `https://www.data.gouv.fr/api/1/datasets/r/${RESOURCE_ID}`;
+    const RESOURCE_TITLE = 'DEP - Base statistique départementale de la délinquance (SSMSI)';
+    const RESOURCE_SOURCE = `https://explore.data.gouv.fr/fr/resources/${RESOURCE_ID}`;
+
+    const ALL = '__all__';
+    const TYPE_CONFIG = {
+      personnes: { label: 'Atteintes aux personnes', categories: [
+        { key: 'all', label: 'Toutes', indicators: null },
+        { key: 'agression_physique', label: 'Agressions physiques', indicators: ['Violences physiques hors cadre familial', 'Homicides', "Tentatives d'homicide"] },
+        { key: 'agression_verbale', label: 'Agressions verbales', indicators: ['Violences physiques intrafamiliales'] },
+        { key: 'violences_sexuelles', label: 'Violences sexuelles', indicators: ['Violences sexuelles'] },
+      ]},
+      biens: { label: 'Atteintes aux biens', categories: [
+        { key: 'all', label: 'Toutes', indicators: null },
+        { key: 'braquage', label: 'Braquages', indicators: ['Vols avec armes'] },
+        { key: 'cambriolage', label: 'Cambriolages', indicators: ['Cambriolages de logement'] },
+        { key: 'fraudes', label: 'Fraudes', indicators: ['Escroqueries et fraudes aux moyens de paiement'] },
+        { key: 'vandalisme', label: 'Vandalisme', indicators: ['Destructions et degradations volontaires'] },
+        { key: 'vol', label: 'Vols', indicators: ['Vols de vehicule', 'Vols dans les vehicules', "Vols d'accessoires sur vehicules", 'Vols violents sans arme', 'Vols sans violence contre des personnes'] },
+        { key: 'stup', label: 'Stupéfiants', indicators: ['Trafic de stupefiants', 'Usage de stupefiants'] },
+      ]}
+    };
+    const INDICATOR_TYPE_OVERRIDES = new Map([
+      ['homicides', 'personnes'],
+      ['tentatives dhomicide', 'personnes'],
+      ['violences physiques intrafamiliales', 'personnes'],
+      ['violences physiques hors cadre familial', 'personnes'],
+      ['violences sexuelles', 'personnes'],
+    ]);
+
+    // === HELPERS ===
+    const normaliseLabel = v => (v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[’']/g,"'").toLowerCase();
+    const normaliseCode = v => { if (typeof v !== 'string') return String(v).padStart(2,'0'); return v.trim().toUpperCase(); };
+    const parseNum = v => { if (v==null) return null; if (typeof v==='number') return Number.isFinite(v)?v:null; const t=String(v).replace(/\s+/g,'').replace(',','.'); const n=Number(t); return Number.isFinite(n)?n:null; };
+
+    const map = L.map('map', { minZoom: 4.5, maxZoom: 11, zoomSnap: 0.1 }).setView([46.6, 2.6], 5.9);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap' }).addTo(map);
+
+    const status = document.getElementById('status');
+    const typeSel = document.getElementById('type-select');
+    const catSel = document.getElementById('category-select');
+    const indSel = document.getElementById('indicator-select');
+    const yearSel = document.getElementById('year-select');
+    const metricSel = document.getElementById('metric-select');
+
+    const nf0 = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 0 });
+    const nf2 = new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const frCmp = new Intl.Collator('fr');
+
+    const rows = []; // {code, annee, indicateur, unite, nombre, taux, population}
+    let geo = null, layer = null, info = null, legend = null, fitOnce = false;
+    let categoriesByType = {}, categoryIndex = new Map();
+
+    // 6 classes (bornes égales) & palette orange (6 tons)
+    const ORANGE6 = ['#feedde','#fdc790','#fdae6b','#fd8d3c','#e6550d','#a63603'];
+    const thresholds6 = values => {
+      if (!values.length) return { min:0, max:0, bounds:[0,0,0,0,0] };
+      const sorted = values.slice().sort((a,b)=>a-b); const min = sorted[0], max = sorted[sorted.length-1];
+      if (min===max) return { min, max, bounds:[min,min,min,min,min] };
+      const step = (max-min)/6; return { min, max, bounds: [1,2,3,4,5].map(i=>min+i*step) };
+    };
+    const colour6 = (v, b) => {
+      if (!Number.isFinite(v)) return '#f5f5f5';
+      if (v<=b[0]) return ORANGE6[0];
+      if (v<=b[1]) return ORANGE6[1];
+      if (v<=b[2]) return ORANGE6[2];
+      if (v<=b[3]) return ORANGE6[3];
+      if (v<=b[4]) return ORANGE6[4];
+      return ORANGE6[5];
+    };
+
+    const infoCtrl = L.control({ position:'topright' });
+    infoCtrl.onAdd = function(){ this._div = L.DomUtil.create('div','info'); this.update(); return this._div; };
+    infoCtrl.update = function(props, rec, metric){
+      if (!props || !rec){ this._div.innerHTML = '<h3>Délinquance</h3><p>Survolez un département</p>'; return; }
+      const name = props.nom || props.name || `Code ${props.code}`;
+      const unit = rec.unite || 'faits';
+      const nb = Number.isFinite(rec.nombre) ? nf0.format(rec.nombre) : 'n.d.';
+      const tx = Number.isFinite(rec.taux) ? `${nf2.format(rec.taux)} / 1 000 hab.` : 'n.d.';
+      const label = metric==='taux' ? tx : `${nb} ${unit.toLowerCase()}`;
+      const pop = Number.isFinite(rec.population) ? `<span style="opacity:.8"> · Population ${nf0.format(rec.population)}</span>` : '';
+      this._div.innerHTML = `<h3>${name}</h3><p><strong>${label}</strong>${pop}</p>`;
+    };
+
+    const buildLegend6 = (values, metric) => {
+      if (legend) legend.remove();
+      legend = L.control({ position:'bottomright' });
+      legend.onAdd = function(){
+        const div = L.DomUtil.create('div','legend');
+        const th = thresholds6(values); const stops = [th.min, ...th.bounds, th.max];
+        const suffix = metric==='taux' ? ' / 1 000 hab.' : '';
+        div.innerHTML = '<h3>Niveau observé</h3>';
+        if (!values.length){ div.innerHTML += '<span><i class="missing"></i>Aucune donnée</span>'; return div; }
+        for (let i=0;i<stops.length-1;i++){
+          const from = stops[i], to = stops[i+1];
+          const col = colour6(to, th.bounds);
+          const lab = metric==='taux' ? `${nf2.format(from)} - ${nf2.format(to)}${suffix}` : `${nf0.format(from)} - ${nf0.format(to)}${suffix}`;
+          div.innerHTML += `<span><i style="background:${col}"></i>${lab}</span>`;
+        }
+        div.innerHTML += '<span><i class="missing"></i>Donnée manquante</span>';
+        return div;
+      };
+      legend.addTo(map);
+    };
+
+    const loadGeo = async () => {
+      const res = await fetch('https://raw.githubusercontent.com/gregoiredavid/france-geojson/master/departements.geojson');
+      if (!res.ok) throw new Error('Fond de carte indisponible.');
+      return res.json();
+    };
+
+    const fetchMeta = async () => {
+      try { const r = await fetch(RESOURCE_URL, { method:'HEAD' }); return { last: r.headers.get('Last-Modified'), size: r.headers.get('Content-Length') }; }
+      catch { return {}; }
+    };
+
+    const prepareTaxonomy = indicators => {
+      const lookup = new Map(indicators.map(x=>[normaliseLabel(x), x]));
+      categoriesByType = {};
+      Object.entries(TYPE_CONFIG).forEach(([typeKey, cfg]) => {
+        const cats = cfg.categories.map(c => {
+          const resolved = c.indicators ? c.indicators.map(base=>lookup.get(normaliseLabel(base))).filter(Boolean) : [];
+          return { key:c.key, label:c.label, indicators:Array.from(new Set(resolved)) };
+        });
+        categoriesByType[typeKey] = cats;
+      });
+      indicators.forEach(name => {
+        const t = INDICATOR_TYPE_OVERRIDES.get(normaliseLabel(name)) || 'biens';
+        const list = categoriesByType[t] || []; const all = list.find(c=>c.key==='all');
+        if (all && !all.indicators.includes(name)) all.indicators.push(name);
+      });
+      // assure que "Toutes" ait tout si vide
+      Object.values(categoriesByType).forEach(list => {
+        const base = new Set(); list.forEach(c=>c.indicators.forEach(i=>base.add(i)));
+        list.forEach(c=>{ if (c.key==='all' && !c.indicators.length) c.indicators = Array.from(base); });
+      });
+    };
+
+    const populateTypes = () => {
+      const prev = typeSel.value; typeSel.innerHTML=''; typeSel.appendChild(new Option('Toutes', ALL));
+      Object.entries(categoriesByType).forEach(([k, cats]) => { if (cats.some(c=>c.indicators.length)) typeSel.appendChild(new Option(TYPE_CONFIG[k].label, k)); });
+      typeSel.disabled = typeSel.options.length === 0; typeSel.value = (prev && (prev===ALL || categoriesByType[prev])) ? prev : (categoriesByType.personnes ? 'personnes' : ALL);
+    };
+
+    const populateCategories = (typeValue) => {
+      const prev = catSel.value; catSel.innerHTML=''; categoryIndex.clear(); catSel.appendChild(new Option('Toutes', ALL));
+      const types = typeValue===ALL ? Object.keys(categoriesByType) : [typeValue];
+      const cats = [];
+      types.forEach(t => { (categoriesByType[t]||[]).forEach(c => { if (c.indicators.length) cats.push({ t, ...c }); }); });
+      cats.sort((a,b)=>frCmp.compare(`${TYPE_CONFIG[a.t].label}·${a.label}`, `${TYPE_CONFIG[b.t].label}·${b.label}`));
+      cats.forEach(c => { const code=`${c.t}::${c.key}`; categoryIndex.set(code,c); catSel.appendChild(new Option(typeValue===ALL?`${TYPE_CONFIG[c.t].label} · ${c.label}`:c.label, code)); });
+      catSel.disabled = catSel.options.length === 0; catSel.value = (prev && (prev===ALL || categoryIndex.has(prev))) ? prev : (catSel.options[1]?.value || ALL);
+      populateIndicators(typeValue, catSel.value);
+    };
+
+    const populateIndicators = (typeValue, catValue) => {
+      const prev = indSel.value; indSel.innerHTML=''; indSel.appendChild(new Option('Toutes', ALL));
+      const set = new Set();
+      const add = list => list.forEach(i=>set.add(i));
+      if (catValue===ALL){ const types = typeValue===ALL ? Object.keys(categoriesByType) : [typeValue]; types.forEach(t => (categoriesByType[t]||[]).forEach(c => add(c.indicators))); }
+      else { const cat = categoryIndex.get(catValue); if (cat) add(cat.indicators); }
+      Array.from(set).sort((a,b)=>frCmp.compare(a,b)).forEach(i => indSel.appendChild(new Option(i,i)));
+      indSel.disabled = indSel.options.length === 0; indSel.value = (prev && (prev===ALL || set.has(prev))) ? prev : (indSel.options[1]?.value || ALL);
+      fitOnce=false; render(metricSel.value);
+    };
+
+    const activeIndicators = () => {
+      if (indSel.value && indSel.value!==ALL) return [indSel.value];
+      const t = typeSel.value, c = catSel.value; const set = new Set();
+      if (c && c!==ALL){ const cat = categoryIndex.get(c); if (cat) cat.indicators.forEach(i=>set.add(i)); }
+      else { const types = t===ALL ? Object.keys(categoriesByType) : [t]; types.forEach(x => (categoriesByType[x]||[]).forEach(cat => cat.indicators.forEach(i=>set.add(i)))); }
+      return Array.from(set);
+    };
+
+    const render = (metric) => {
+      if (!geo || !rows.length) return;
+      const inds = activeIndicators(); if (!inds.length){ if(layer){layer.remove(); layer=null;} if(legend){legend.remove(); legend=null;} return; }
+      const yVal = yearSel.value; const y = yVal===ALL ? null : Number(yVal);
+      const m = metric || 'nombre';
+
+      const agg = new Map(); // code -> {nombre,taux,unite,pop,inds,years}
+      for (const r of rows){
+        if (!inds.includes(r.indicateur)) continue; if (y!==null && r.annee!==y) continue; const k=r.code;
+        let a = agg.get(k); if(!a) a = { n:0, tSum:0, tCnt:0, u:r.unite||'faits', p: Number.isFinite(r.population)?r.population:null, inds:new Set(), years:new Set() };
+        if (Number.isFinite(r.nombre)) a.n += r.nombre; if (Number.isFinite(r.taux)){ a.tSum += r.taux; a.tCnt++; }
+        if (Number.isFinite(r.population) && !Number.isFinite(a.p)) a.p = r.population;
+        a.u = a.u || r.unite; a.inds.add(r.indicateur); a.years.add(r.annee); agg.set(k,a);
+      }
+
+      const perDep = new Map(); const vals=[];
+      agg.forEach((a,k)=>{ const rec = { code:k, nombre: a.n, taux: a.tCnt? a.tSum/a.tCnt : null, unite: a.u, population: a.p, indicators: Array.from(a.inds).sort((x,y)=>frCmp.compare(x,y)), annees: Array.from(a.years).sort((x,y)=>x-y) }; perDep.set(k, rec); const v = m==='taux'? rec.taux : rec.nombre; if (Number.isFinite(v)) vals.push(v); });
+      const th = thresholds6(vals);
+
+      if (layer) layer.remove();
+      layer = L.geoJSON(geo, {
+        style: f => { const code = normaliseCode(f.properties.code); const rec = perDep.get(code); const v = rec ? (m==='taux'? rec.taux : rec.nombre) : null; return { fillColor: colour6(v, th.bounds), weight:1, color:'#334155', fillOpacity: (rec && Number.isFinite(v))?0.8:0.45, dashArray: (rec && Number.isFinite(v))? null : '3'}; },
+        onEachFeature: (f, lyr) => {
+          const code = normaliseCode(f.properties.code); const rec = perDep.get(code); const name = f.properties.nom || f.properties.name || `Code ${code}`;
+          if (!rec){ lyr.bindPopup(`<strong>${name}</strong><br>Donnée indisponible`); return; }
+          const nb = Number.isFinite(rec.nombre) ? `${nf0.format(rec.nombre)} ${rec.unite.toLowerCase()}` : 'n.d.';
+          const tx = Number.isFinite(rec.taux) ? `${nf2.format(rec.taux)} / 1 000 hab.` : 'n.d.'; const label = (m==='taux')? tx : nb;
+          lyr.bindPopup(`<strong>${name}</strong><br>${label}`);
+          lyr.on('mouseover', e=>{ e.target.setStyle({ weight:2.4, color:'#0f172a', fillOpacity:0.88 }); info.update(f.properties, rec, m); });
+          lyr.on('mouseout', e=>{ layer.resetStyle(e.target); info.update(); });
+          lyr.on('click', e=> map.fitBounds(e.target.getBounds(), { padding:[24,24] }));
+        }
+      }).addTo(map);
+
+      if (!fitOnce){ const b = layer.getBounds(); if (b.isValid()){ map.fitBounds(b, { padding:[28,28] }); fitOnce = true; } }
+      buildLegend6(vals, m);
+    };
+
+    try {
+      status.textContent = 'Téléchargement des données (data.gouv)…';
+      const [csvText, geoObj, meta] = await Promise.all([
+        (async()=>{ const r = await fetch(RESOURCE_URL, { cache:'no-store' }); if(!r.ok) throw new Error('Échec du téléchargement de la ressource.'); return r.text(); })(),
+        (async()=>{ return loadGeo(); })(),
+        (async()=> fetchMeta() )()
+      ]);
+
+      geo = geoObj;
+      const parsed = Papa.parse(csvText, { header:true, delimiter:';', skipEmptyLines:true });
+      rows.length = 0;
+      for (const row of (parsed.data||[])){
+        const code = normaliseCode(row.Code_departement || row.code_departement); if(!code) continue;
+        const indicateur = (row.indicateur||'').trim(); const annee = Number(row.annee); if (!indicateur || !Number.isFinite(annee)) continue;
+        rows.push({ code, annee, indicateur, unite: (row.unite_de_compte||'Faits').trim(), nombre: parseNum(row.nombre), taux: parseNum(row.taux_pour_mille), population: parseNum(row.insee_pop) });
+      }
+      if (!rows.length) throw new Error('Aucune donnée exploitable dans la ressource.');
+
+      // Filtres
+      const years = Array.from(new Set(rows.map(r=>r.annee))).sort((a,b)=>b-a);
+      yearSel.innerHTML = ''; yearSel.appendChild(new Option('Toutes', ALL)); years.forEach(y=>yearSel.appendChild(new Option(String(y), String(y)))); yearSel.disabled = false; yearSel.value = years[0] ? String(years[0]) : ALL;
+
+      const indicators = Array.from(new Set(rows.map(r=>r.indicateur)));
+      // Taxonomie (types / catégories)
+      const lookup = new Map(indicators.map(x=>[normaliseLabel(x), x]));
+      categoriesByType = {};
+      Object.entries(TYPE_CONFIG).forEach(([t,cfg]) => {
+        const cats = cfg.categories.map(c => ({ key:c.key, label:c.label, indicators: (c.indicators? c.indicators.map(b=>lookup.get(normaliseLabel(b))).filter(Boolean):[]) }));
+        categoriesByType[t] = cats;
+      });
+      indicators.forEach(n => { const t = INDICATOR_TYPE_OVERRIDES.get(normaliseLabel(n)) || 'biens'; const list = categoriesByType[t] || []; const all = list.find(x=>x.key==='all'); if (all && !all.indicators.includes(n)) all.indicators.push(n); });
+      Object.values(categoriesByType).forEach(list => { const base = new Set(); list.forEach(c=>c.indicators.forEach(i=>base.add(i))); list.forEach(c=>{ if (c.key==='all' && !c.indicators.length) c.indicators = Array.from(base); }); });
+
+      // Remplissage contrôles
+      const prevType = typeSel.value; typeSel.innerHTML=''; typeSel.appendChild(new Option('Toutes', ALL));
+      Object.entries(categoriesByType).forEach(([k,cats]) => { if (cats.some(c=>c.indicators.length)) typeSel.appendChild(new Option(TYPE_CONFIG[k].label, k)); });
+      typeSel.disabled=false; typeSel.value = (prevType && (prevType===ALL || categoriesByType[prevType])) ? prevType : (categoriesByType.personnes ? 'personnes' : ALL);
+
+      const rebuildCats = () => {
+        const t = typeSel.value; const prev = catSel.value; catSel.innerHTML=''; categoryIndex.clear(); catSel.appendChild(new Option('Toutes', ALL));
+        const ts = t===ALL? Object.keys(categoriesByType) : [t]; const cats=[]; ts.forEach(x => (categoriesByType[x]||[]).forEach(c => { if(c.indicators.length) cats.push({t:x, ...c}); }));
+        cats.sort((a,b)=>frCmp.compare(`${TYPE_CONFIG[a.t].label}·${a.label}`, `${TYPE_CONFIG[b.t].label}·${b.label}`));
+        cats.forEach(c => { const id=`${c.t}::${c.key}`; categoryIndex.set(id,c); catSel.appendChild(new Option(t===ALL?`${TYPE_CONFIG[c.t].label} · ${c.label}`:c.label, id)); });
+        catSel.disabled=false; catSel.value = (prev && (prev===ALL || categoryIndex.has(prev))) ? prev : (catSel.options[1]?.value || ALL);
+        rebuildInds();
+      };
+      const rebuildInds = () => {
+        const t = typeSel.value, c = catSel.value; const prev = indSel.value; indSel.innerHTML=''; indSel.appendChild(new Option('Toutes', ALL));
+        const set = new Set();
+        if (c!==ALL){ const cat = categoryIndex.get(c); if (cat) cat.indicators.forEach(i=>set.add(i)); }
+        else { const ts = t===ALL? Object.keys(categoriesByType) : [t]; ts.forEach(x => (categoriesByType[x]||[]).forEach(cat => cat.indicators.forEach(i=>set.add(i)))); }
+        Array.from(set).sort((a,b)=>frCmp.compare(a,b)).forEach(i => indSel.appendChild(new Option(i,i)));
+        indSel.disabled=false; indSel.value = (prev && (prev===ALL || set.has(prev))) ? prev : (indSel.options[1]?.value || ALL);
+        fitOnce=false; render(metricSel.value);
+      };
+
+      rebuildCats();
+      metricSel.disabled = false;
+
+      const meta = await fetchMeta();
+      const upd = meta.last ? new Date(meta.last).toLocaleDateString('fr-FR') : 'n/d';
+      const sizeLabel = meta.size ? `${nf0.format(meta.size)} octets` : 'taille inconnue';
+      status.innerHTML = `Données officielles SSMSI via data.gouv.fr – <a href="${RESOURCE_SOURCE}" target="_blank" rel="noopener">${RESOURCE_TITLE}</a> (maj ${upd}, ${sizeLabel}).`;
+
+      // listeners
+      typeSel.addEventListener('change', () => { fitOnce=false; rebuildCats(); });
+      catSel.addEventListener('change', () => { fitOnce=false; rebuildInds(); });
+      indSel.addEventListener('change', () => { fitOnce=false; render(metricSel.value); });
+      yearSel.addEventListener('change', () => { fitOnce=false; render(metricSel.value); });
+      metricSel.addEventListener('change', () => { fitOnce=false; render(metricSel.value); });
+
+      info = infoCtrl.addTo(map);
+
+      // initial fit & render
+      const geoLayer = L.geoJSON(geo).addTo(map); const b = geoLayer.getBounds(); if (b.isValid()) map.fitBounds(b, { padding:[28,28] }); geoLayer.remove();
+      render(metricSel.value);
+
+    } catch (err) {
+      console.error(err);
+      status.classList.add('status-error');
+      status.innerHTML = (err.message||'Erreur de chargement des données.') + '<br><em>Ouvrez via un serveur local ou GitHub Pages pour autoriser les requêtes réseau.</em>';
+    }
+  })();
+  </script>
+</body>
+</html>
